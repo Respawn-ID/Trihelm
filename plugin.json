@@ -1,0 +1,12 @@
+{
+  "name": "codex-dsh-orchestrator",
+  "displayName": "Conductor",
+  "version": "1.3.0",
+  "logo": "assets/logo.png",
+  "description": "Multi-model orchestration hub for Antigravity — autonomously routes coding, aesthetics, image generation, deep root-cause diagnosis, and independent Verdict reviews across DSH, Codex (Sol/Astra), and built-in Opus 5.5 with Git worktree isolation.",
+  "suggestedPrompts": [
+    "检查编排器状态、并发池与今日各模型调用统计",
+    "用 verdictMode 对当前未提交改动做独立异构只读验收",
+    "按模块拆分 worktree 并行派发实现，完成后冲突预检并合并"
+  ]
+}
