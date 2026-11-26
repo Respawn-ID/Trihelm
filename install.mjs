@@ -15,7 +15,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildRuntimePath, resolveCodexBin, resolveDshBin } from "./server/lib/paths.mjs";
+import { buildRuntimePath, findInPath, resolveCodexBin, resolveDshBin } from "./server/lib/paths.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ID = "codex-dsh-orchestrator";
@@ -35,7 +35,9 @@ function parseArgs(argv) {
     codexBin: null,
     dshBin: null,
     dshConcurrency: null,
-    nodeBin: process.execPath,
+    nodeBin:
+      findInPath(process.platform === "win32" ? ["node.exe", "node"] : ["node"]) ||
+      process.execPath,
   };
 
   for (let i = 0; i < argv.length; i += 1) {
