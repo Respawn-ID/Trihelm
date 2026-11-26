@@ -140,7 +140,7 @@ test("install.mjs installs, preserves existing MCP servers, and cleanly uninstal
       assert.ok(fs.existsSync(path.join(pluginDir, rel)), `Missing installed file: ${rel}`);
     }
     const manifest = JSON.parse(fs.readFileSync(path.join(pluginDir, "plugin.json"), "utf8"));
-    assert.equal(manifest.displayName, "Conductor");
+    assert.equal(manifest.displayName, "Trihelm");
     assert.equal(manifest.logo, "assets/logo.png");
 
     // Verify mcp_config.json merged without clobbering existing-server

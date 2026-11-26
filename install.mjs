@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 /**
- * Conductor (codex-dsh-orchestrator) portable installer / uninstaller for Antigravity.
+ * Trihelm (codex-dsh-orchestrator) portable installer / uninstaller for Antigravity.
  *
  * Zero external dependencies — runs with Node.js >= 18 on macOS, Linux, and Windows.
  *
  * Usage:
- *   node install.mjs                  # Install or upgrade Conductor plugin + global MCP registration
+ *   node install.mjs                  # Install or upgrade Trihelm plugin + global MCP registration
  *   node install.mjs --dry-run        # Preview actions without modifying files
  *   node install.mjs --uninstall      # Remove plugin & MCP registration (preserves other MCP servers)
  *   node install.mjs --help           # Show all options
@@ -64,13 +64,13 @@ function parseArgs(argv) {
 }
 
 function printHelp() {
-  process.stdout.write(`Conductor (codex-dsh-orchestrator) Installer for Antigravity
+  process.stdout.write(`Trihelm (codex-dsh-orchestrator) Installer for Antigravity
 
 Usage:
   node install.mjs [options]
 
 Options:
-  --uninstall              Remove Conductor plugin and its global mcp_config.json entry
+  --uninstall              Remove Trihelm plugin and its global mcp_config.json entry
   --purge-data             With --uninstall, also remove saved jobs/metrics in plugin_data
   --dry-run                Print planned operations without writing to disk
   --skip-npm               Skip installing server/node_modules dependencies
@@ -173,7 +173,7 @@ function install(opts) {
     env: envBlock,
   };
 
-  console.log(`\nConductor (Antigravity Multi-Model Orchestrator) — Installer`);
+  console.log(`\nTrihelm (Antigravity Multi-Model Orchestrator) — Installer`);
   console.log(`  Source repo : ${__dirname}`);
   console.log(`  Plugin dir  : ${opts.pluginDir}`);
   console.log(`  MCP config  : ${opts.mcpConfig}`);
@@ -220,7 +220,7 @@ function install(opts) {
   console.log(`[3/3] Registered "${PLUGIN_ID}" in ${opts.mcpConfig}`);
 
   console.log(`\nDone! Next steps:`);
-  console.log(`  1. Restart Antigravity (or reload MCP servers) to activate Conductor v1.3.0.`);
+  console.log(`  1. Restart Antigravity (or reload MCP servers) to activate Trihelm v1.3.0.`);
   console.log(`  2. Verify inside Antigravity by asking: "检查编排器状态" (runs orchestrator_status).`);
   if (!codexFound) {
     console.log(`  - Optional: install Codex CLI and sign in to enable GPT-6.2 Sol/Astra & ChatGPT image_gen.`);
@@ -231,7 +231,7 @@ function install(opts) {
 }
 
 function uninstall(opts) {
-  console.log(`\nConductor — Uninstaller`);
+  console.log(`\nTrihelm — Uninstaller`);
   console.log(`  Plugin dir : ${opts.pluginDir}`);
   console.log(`  MCP config : ${opts.mcpConfig}`);
 
