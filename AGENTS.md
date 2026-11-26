@@ -29,7 +29,7 @@ node -v && git --version
 ### Step 2 · Clone (or Pull) the Repository
 If you are not already inside a local clone of this repo, clone it to a clean temporary directory (do **not** pollute the user's project repo):
 ```bash
-git clone --depth 1 <github-repo-url> "${TMPDIR:-/tmp}/trihelm-install"
+git clone --depth 1 https://github.com/Respawn-ID/Trihelm.git "${TMPDIR:-/tmp}/trihelm-install"
 cd "${TMPDIR:-/tmp}/trihelm-install"
 ```
 *(If the user already cloned the repo locally, run `git pull --ff-only` inside their existing checkout instead.)*

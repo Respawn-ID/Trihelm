@@ -15,7 +15,7 @@
 
 This repository ships with a machine-readable [`AGENTS.md`](./AGENTS.md) install playbook. Just paste your GitHub URL to **Antigravity** (or Claude Code / Codex / Cursor) and say:
 
-> **"Read `AGENTS.md` in `https://github.com/<owner>/trihelm` and install Trihelm for me."**
+> **"Read `AGENTS.md` in `https://github.com/Respawn-ID/Trihelm` and install Trihelm for me."**
 
 Your AI agent will automatically preflight Node.js/Git, clone the repo, preview paths with `--dry-run`, run `node install.mjs` (without touching your other MCP servers), and guide you to verify `orchestrator_status`.
 
@@ -24,8 +24,8 @@ Your AI agent will automatically preflight Node.js/Git, clone the repo, preview 
 ## Manual Quick Install (macOS / Linux / Windows)
 
 ```bash
-git clone https://github.com/<owner>/trihelm.git
-cd trihelm
+git clone https://github.com/Respawn-ID/Trihelm.git
+cd Trihelm
 node install.mjs
 ```
 

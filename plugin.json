@@ -3,6 +3,8 @@
   "displayName": "Trihelm",
   "version": "1.3.0",
   "logo": "assets/logo.png",
+  "homepage": "https://github.com/Respawn-ID/Trihelm",
+  "repository": "https://github.com/Respawn-ID/Trihelm",
   "description": "Multi-model orchestration hub for Antigravity — autonomously routes coding, aesthetics, image generation, deep root-cause diagnosis, and independent Verdict reviews across DSH, Codex (Sol/Astra), and built-in Opus 5.5 with Git worktree isolation.",
   "suggestedPrompts": [
     "检查编排器状态、并发池与今日各模型调用统计",
