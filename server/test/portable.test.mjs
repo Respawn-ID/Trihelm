@@ -17,7 +17,7 @@ function makeTempDir(prefix) {
 }
 
 test("paths.mjs resolves binaries via env override, PATH lookup, home fallback, and safe defaults", () => {
-  const tmp = makeTempDir("conductor-paths-");
+  const tmp = makeTempDir("trihelm-paths-");
   try {
     const binDir = path.join(tmp, "bin");
     const fakeHome = path.join(tmp, "home");
@@ -86,7 +86,7 @@ test("paths.mjs resolves binaries via env override, PATH lookup, home fallback, 
 });
 
 test("install.mjs installs, preserves existing MCP servers, and cleanly uninstalls in an isolated sandbox", () => {
-  const sandbox = makeTempDir("conductor-install-");
+  const sandbox = makeTempDir("trihelm-install-");
   try {
     const pluginDir = path.join(sandbox, "plugins", "codex-dsh-orchestrator");
     const mcpConfig = path.join(sandbox, "mcp_config.json");
@@ -152,7 +152,7 @@ test("install.mjs installs, preserves existing MCP servers, and cleanly uninstal
     assert.equal(entry.env.CODEX_BIN, fakeCodex);
     assert.equal(entry.env.DSH_MAX_CONCURRENCY, "4");
 
-    // Uninstall cleanly removes only Conductor
+    // Uninstall cleanly removes only Trihelm
     execFileSync(
       process.execPath,
       [INSTALL_SCRIPT, "--uninstall", "--plugin-dir", pluginDir, "--mcp-config", mcpConfig],
