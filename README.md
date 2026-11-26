@@ -6,6 +6,10 @@
 
 <p align="center">
   <strong>Multi-Model Orchestration Hub for Antigravity</strong><br/>
+  English | <a href="./README.zh-CN.md">简体中文</a>
+</p>
+
+<p align="center">
   One central helm coordinating DeepSeek Harness (DSH), Codex (Sol / Astra &amp; ChatGPT <code>image_gen</code>), and Antigravity's built-in models with Git worktree isolation and independent Verdict verification.
 </p>
 

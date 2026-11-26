@@ -76,6 +76,182 @@ function choosePermissionOption(options, allow) {
   );
 }
 
+function flattenModelOptions(modelOpt) {
+  const flat = [];
+  if (!modelOpt || !Array.isArray(modelOpt.options)) return flat;
+
+  const pushOpt = (opt, groupName = null) => {
+    if (!opt || typeof opt !== "object") return;
+    if (Array.isArray(opt.options)) {
+      for (const child of opt.options) {
+        pushOpt(child, opt.group || opt.name || groupName);
+      }
+      return;
+    }
+    if (typeof opt.value !== "string") return;
+    let parsedProvider = null;
+    let parsedModel = opt.value;
+    try {
+      const parsed = JSON.parse(opt.value);
+      if (Array.isArray(parsed) && parsed.length >= 2) {
+        parsedProvider = String(parsed[0]);
+        parsedModel = String(parsed[1]);
+      }
+    } catch {}
+    flat.push({
+      value: opt.value,
+      name: String(opt.name || ""),
+      group: groupName ? String(groupName) : parsedProvider,
+      parsedProvider,
+      parsedModel,
+    });
+  };
+
+  for (const item of modelOpt.options) {
+    pushOpt(item, null);
+  }
+  return flat;
+}
+
+function stripRoutingPrefix(str) {
+  return String(str || "")
+    .trim()
+    .replace(/^(auto|routing|default)\//i, "");
+}
+
+function foldModelToken(str) {
+  return stripRoutingPrefix(str)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "");
+}
+
+function foldModelWithoutVersion(str) {
+  return stripRoutingPrefix(str)
+    .toLowerCase()
+    .replace(/v\d+(?:\.\d+)*/g, "")
+    .replace(/[^a-z0-9]+/g, "");
+}
+
+function modelMatchesOption(targetModel, opt) {
+  const reqRaw = String(targetModel || "").trim().toLowerCase();
+  const reqStripped = stripRoutingPrefix(reqRaw).toLowerCase();
+  const reqFold = foldModelToken(targetModel);
+  const optModelRaw = String(opt.parsedModel || "").trim().toLowerCase();
+  const optModelStripped = stripRoutingPrefix(optModelRaw).toLowerCase();
+  const optModelFold = foldModelToken(opt.parsedModel);
+  const optNameFold = foldModelToken(opt.name);
+
+  if (reqRaw && (reqRaw === optModelRaw || reqRaw === opt.value.toLowerCase())) return 4;
+  if (reqStripped && (reqStripped === optModelStripped || reqStripped === optModelRaw)) return 3;
+  if (reqFold && (reqFold === optModelFold || reqFold === optNameFold)) return 3;
+  if (reqFold && (optNameFold.includes(reqFold) || optModelFold.includes(reqFold))) return 2;
+
+  const reqNoVer = foldModelWithoutVersion(targetModel);
+  const optModelNoVer = foldModelWithoutVersion(opt.parsedModel);
+  const optNameNoVer = foldModelWithoutVersion(opt.name);
+  if (reqNoVer && reqNoVer.length >= 6 && (reqNoVer === optModelNoVer || reqNoVer === optNameNoVer)) {
+    return 1;
+  }
+  return 0;
+}
+
+/**
+ * Resolves a requested DSH provider/model against the live `session/new`
+ * model configOptions so both official model names (e.g. `deepseek-flash`,
+ * `DeepSeek-V4.1-Flash`) and routed names (e.g. `auto/deepseek-v4.1-flash`)
+ * work seamlessly across different machines.
+ */
+export function resolveDshModelOption(modelOpt, { provider, model } = {}) {
+  const reqProvider = provider ? String(provider).trim() : "";
+  const reqModel = model ? String(model).trim() : "";
+  const currentValue = modelOpt?.currentValue || null;
+
+  if (!reqProvider && !reqModel) {
+    return { value: currentValue, needsSwitch: false, matched: true, note: null };
+  }
+
+  const options = flattenModelOptions(modelOpt);
+
+  // If raw JSON tuple string was passed directly
+  if (reqModel.startsWith("[")) {
+    const exact = options.find((o) => o.value === reqModel);
+    if (exact) {
+      return { value: exact.value, needsSwitch: exact.value !== currentValue, matched: true, note: null };
+    }
+    if (options.length === 0) {
+      return { value: reqModel, needsSwitch: reqModel !== currentValue, matched: true, note: null };
+    }
+    try {
+      const parsed = JSON.parse(reqModel);
+      if (Array.isArray(parsed) && parsed.length >= 2) {
+        return resolveDshModelOption(modelOpt, { provider: parsed[0], model: parsed[1] });
+      }
+    } catch {}
+  }
+
+  // If DSH didn't report an options list (e.g. minimal mock), fall back to legacy tuple formatting
+  if (options.length === 0) {
+    let fallbackValue;
+    if (reqProvider && reqModel) {
+      fallbackValue = JSON.stringify([reqProvider, reqModel]);
+    } else if (currentValue) {
+      let curProvider = reqProvider;
+      let curModel = reqModel;
+      try {
+        const parsed = JSON.parse(currentValue);
+        if (Array.isArray(parsed) && parsed.length >= 2) {
+          if (!curProvider) curProvider = String(parsed[0]);
+          if (!curModel) curModel = String(parsed[1]);
+        }
+      } catch {}
+      fallbackValue = curProvider && curModel ? JSON.stringify([curProvider, curModel]) : reqModel || currentValue;
+    } else {
+      fallbackValue = reqProvider && reqModel ? JSON.stringify([reqProvider, reqModel]) : reqModel;
+    }
+    return { value: fallbackValue, needsSwitch: Boolean(fallbackValue && fallbackValue !== currentValue), matched: true, note: null };
+  }
+
+  // Score every available option on this machine
+  const candidates = options
+    .map((opt) => {
+      const providerMatch =
+        !reqProvider ||
+        String(opt.parsedProvider || "").toLowerCase() === reqProvider.toLowerCase() ||
+        String(opt.group || "").toLowerCase() === reqProvider.toLowerCase();
+      const modelScore = reqModel ? modelMatchesOption(reqModel, opt) : 2;
+      const isCurrent = opt.value === currentValue ? 1 : 0;
+      return { opt, providerMatch, modelScore, isCurrent };
+    })
+    .filter((c) => (reqModel ? c.modelScore > 0 : c.providerMatch));
+
+  if (candidates.length > 0) {
+    candidates.sort((a, b) => {
+      if (a.providerMatch !== b.providerMatch) return a.providerMatch ? -1 : 1;
+      if (a.modelScore !== b.modelScore) return b.modelScore - a.modelScore;
+      if (a.isCurrent !== b.isCurrent) return b.isCurrent - a.isCurrent;
+      return 0;
+    });
+    const best = candidates[0];
+    const adaptedNote =
+      !best.providerMatch && reqProvider
+        ? `Provider '${reqProvider}' unavailable on this DSH; auto-mapped to ${best.opt.value} (${best.opt.name}).`
+        : null;
+    return {
+      value: best.opt.value,
+      needsSwitch: best.opt.value !== currentValue,
+      matched: true,
+      note: adaptedNote,
+    };
+  }
+
+  return {
+    value: currentValue,
+    needsSwitch: false,
+    matched: false,
+    note: `Requested model '${reqProvider ? `${reqProvider}/` : ""}${reqModel}' was not found in DSH options; kept current default ${currentValue || "model"}.`,
+  };
+}
+
 export class DshAcpClient {
   constructor({
     dshBin,
@@ -426,14 +602,15 @@ export class DshAcpClient {
       let sessionId = args.sessionId ? String(args.sessionId) : null;
       let createdNew = false;
       let activeModel = sessionId ? this.sessionModels.get(sessionId) || null : null;
+      let modelOpt = null;
       if (!sessionId) {
         const created = await this.request("session/new", { cwd, mcpServers: [] }, 30_000, signal);
         sessionId = created?.sessionId;
         if (!sessionId) {
           throw new Error(`dsh ACP session/new returned no sessionId: ${JSON.stringify(created)}`);
         }
-        const modelOpt = Array.isArray(created?.configOptions)
-          ? created.configOptions.find((opt) => opt.id === "model")
+        modelOpt = Array.isArray(created?.configOptions)
+          ? created.configOptions.find((opt) => opt.id === "model") || null
           : null;
         if (modelOpt?.currentValue) {
           activeModel = modelOpt.currentValue;
@@ -442,32 +619,42 @@ export class DshAcpClient {
         createdNew = true;
       }
 
-      if (args.model || args.provider) {
-        let modelValue;
-        if (args.provider && args.model) {
-          modelValue = JSON.stringify([String(args.provider), String(args.model)]);
-        } else if (typeof args.model === "string" && args.model.trim().startsWith("[")) {
-          modelValue = args.model.trim();
-        } else {
-          const provider = args.provider ? String(args.provider) : "magpie";
-          const model = args.model ? String(args.model) : "auto/deepseek-v4.1-flash";
-          modelValue = JSON.stringify([provider, model]);
+      const requestedModel = args.model || process.env.DSH_DEFAULT_MODEL || "";
+      const requestedProvider = args.provider || process.env.DSH_DEFAULT_PROVIDER || "";
+      let modelSwitchWarning = null;
+
+      if (requestedModel || requestedProvider) {
+        const resolved = resolveDshModelOption(modelOpt || { currentValue: activeModel, options: [] }, {
+          provider: requestedProvider,
+          model: requestedModel,
+        });
+        if (resolved.note) {
+          modelSwitchWarning = resolved.note;
+          this.log(`[${this.workerId}] ${resolved.note}`);
         }
-        const setRes = await this.request(
-          "session/set_config_option",
-          {
-            sessionId,
-            configId: "model",
-            value: modelValue,
-          },
-          15_000,
-          signal
-        );
-        const updatedModelOpt = Array.isArray(setRes?.configOptions)
-          ? setRes.configOptions.find((opt) => opt.id === "model")
-          : null;
-        activeModel = updatedModelOpt?.currentValue || modelValue;
-        this.sessionModels.set(sessionId, activeModel);
+        if (resolved.needsSwitch && resolved.value) {
+          try {
+            const setRes = await this.request(
+              "session/set_config_option",
+              {
+                sessionId,
+                configId: "model",
+                value: resolved.value,
+              },
+              15_000,
+              signal
+            );
+            const updatedModelOpt = Array.isArray(setRes?.configOptions)
+              ? setRes.configOptions.find((opt) => opt.id === "model")
+              : null;
+            activeModel = updatedModelOpt?.currentValue || resolved.value;
+            this.sessionModels.set(sessionId, activeModel);
+          } catch (err) {
+            if (err.name === "AbortError") throw err;
+            modelSwitchWarning = `Could not switch DSH model to ${resolved.value} (${err.message}); continued with ${activeModel || "DSH default"}.`;
+            this.log(`[${this.workerId}] ${modelSwitchWarning}`);
+          }
+        }
       }
 
       if (args.reasoningEffort) {
@@ -538,6 +725,7 @@ export class DshAcpClient {
           sessionId,
           createdNew,
           activeModel,
+          ...(modelSwitchWarning ? { modelSwitchWarning } : {}),
           cwd,
           permissionPolicy,
           stopReason: promptRes?.stopReason || null,

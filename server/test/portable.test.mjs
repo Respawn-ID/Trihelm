@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { resolveDshModelOption } from "../lib/dsh-pool.mjs";
 import { buildRuntimePath, resolveCodexBin, resolveDshBin } from "../lib/paths.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -166,4 +167,65 @@ test("install.mjs installs, preserves existing MCP servers, and cleanly uninstal
   } finally {
     fs.rmSync(sandbox, { recursive: true, force: true });
   }
+});
+
+test("dsh-pool.mjs resolveDshModelOption adapts across official model names and auto/* routing groups", () => {
+  const officialOnlyOpt = {
+    id: "model",
+    currentValue: '["deepseek-account","deepseek-flash"]',
+    options: [
+      {
+        group: "deepseek-account",
+        name: "DeepSeek Account",
+        options: [
+          { value: '["deepseek-account","deepseek-flash"]', name: "DeepSeek-V4.1-Flash" },
+          { value: '["deepseek-account","deepseek-v4-pro"]', name: "DeepSeek-V4-Pro" },
+        ],
+      },
+    ],
+  };
+
+  // 1. Omitting model/provider inherits current user default with zero switch calls
+  const inherited = resolveDshModelOption(officialOnlyOpt, {});
+  assert.equal(inherited.value, '["deepseek-account","deepseek-flash"]');
+  assert.equal(inherited.needsSwitch, false);
+
+  // 2. Passing magpie + auto/deepseek-v4.1-flash on an official-only DSH auto-maps to DeepSeek-V4.1-Flash
+  const mappedFlash = resolveDshModelOption(officialOnlyOpt, {
+    provider: "magpie",
+    model: "auto/deepseek-v4.1-flash",
+  });
+  assert.equal(mappedFlash.value, '["deepseek-account","deepseek-flash"]');
+  assert.equal(mappedFlash.matched, true);
+  assert.equal(mappedFlash.needsSwitch, false);
+  assert.match(mappedFlash.note, /auto-mapped/);
+
+  // 3. Passing bare deepseek-v4-pro switches cleanly to official pro option
+  const mappedPro = resolveDshModelOption(officialOnlyOpt, { model: "deepseek-v4-pro" });
+  assert.equal(mappedPro.value, '["deepseek-account","deepseek-v4-pro"]');
+  assert.equal(mappedPro.needsSwitch, true);
+
+  // 4. Passing deepseek-flash on a magpie-routed DSH maps to auto/deepseek-v4.1-flash
+  const routedOpt = {
+    id: "model",
+    currentValue: '["magpie","auto/deepseek-v4.1-flash"]',
+    options: [
+      {
+        group: "magpie",
+        name: "Magpie",
+        options: [
+          { value: '["magpie","auto/deepseek-v4.1-flash"]', name: "DeepSeek V4.1 Flash · routing group" },
+        ],
+      },
+    ],
+  };
+  const reverseMapped = resolveDshModelOption(routedOpt, { model: "deepseek-flash" });
+  assert.equal(reverseMapped.value, '["magpie","auto/deepseek-v4.1-flash"]');
+  assert.equal(reverseMapped.matched, true);
+
+  // 5. Completely unknown model degrades gracefully to currentValue instead of throwing
+  const unknown = resolveDshModelOption(officialOnlyOpt, { model: "nonexistent-model-xyz" });
+  assert.equal(unknown.matched, false);
+  assert.equal(unknown.needsSwitch, false);
+  assert.equal(unknown.value, '["deepseek-account","deepseek-flash"]');
 });
