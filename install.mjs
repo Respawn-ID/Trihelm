@@ -20,7 +20,7 @@ import { buildRuntimePath, findInPath, resolveCodexBin, resolveDshBin } from "./
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ID = "codex-dsh-orchestrator";
 const COPY_ITEMS = ["plugin.json", "assets", "rules", "skills", "server"];
-const SKIP_NAMES = new Set(["node_modules", ".git", ".DS_Store"]);
+const SKIP_NAMES = new Set(["node_modules", ".git", ".DS_Store", "test"]);
 
 function parseArgs(argv) {
   const home = os.homedir();

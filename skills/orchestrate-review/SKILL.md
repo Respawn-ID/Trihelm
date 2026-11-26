@@ -106,12 +106,13 @@ Report: 列出改动文件、实际执行命令的最后 10-20 行输出；凡�
 
 ### 1. 单轨道开发 + 确定性先验 + 分级异构验收
 1. **带护栏派单**：写任务必传 `allowedPaths` / `forbiddenPaths`；未开 Worktree 时严禁两方同时写同一 `cwd`。
-2. **确定性门控先跑（零模型幻觉成本）**：
+2. **确定性门控 + 防篡改测试先跑（零模型幻觉成本）**：
    - 主控先查 `scopeAudit.violations`、`scopeAudit.diffStat`（含各文件 `+增/-删` 行数，及 DSH `deniedActions`）与 `git diff`；
+   - **防篡改验证器（Anti-Tampering）**：修 Bug 或重构时，严禁外派 Worker 通过削弱/删改既有测试断言来“刷绿”；必要时将既有测试目录列入 `forbiddenPaths`，并在验收时核查 `scopeAudit.changedFiles` 确认无异常测试删改；
    - 主控亲自运行本地测试 / 类型检查 / lint；未通过则直接复用原 `sessionId`/`threadId` 打回返工，**不浪费异构模型审未过测试的半成品**。
-3. **分级异构 Verdict 验收（严格陌生人新会话）**：
-   - **低风险小改**：确定性测试全过 + diff 清晰 → 主控直接签收；
-   - **中高风险 / 多文件 / 核心逻辑**：强制派**异构模型**执行 **`verdictMode: true`**（严禁传 `threadId`/`sessionId`，自动锁死只读 + 返回含 1-based 行号与命令证据的 `ACCEPTED`/`REJECTED` JSON）：
+3. **风险分级门控（Risk-Based Gating，按爆炸半径而非文件数一刀切）**：
+   - **低风险（日常大多数改动）**：常规功能增改、UI/样式微调、文档与非核心小中改动 → 确定性测试/构建全过 + 主控审完 `diff` **直接签收**（不额外拉第二轮异构 `verdictMode`，也不强行为小改硬补多余单测）；
+   - **中高风险 / 核心 / 发 PR 终审**：涉及核心架构重构、并发/状态机、鉴权安全、支付/数据迁移、或用户点名严格验收 → 触发**异构模型**执行 **`verdictMode: true`**（严禁传 `threadId`/`sessionId`，自动锁死只读 + 返回含 1-based 行号与命令证据的 `ACCEPTED`/`REJECTED` JSON；高危改动增加 HITL 人工确认）：
      - 常规及中高风险改动 → 优先 **Codex Sol**（`codex_run(model: "gpt-6.2-sol", verdictMode: true)`，日常 `medium` / 高风险 `high`，或 `codex_review`）；
      - 核心/极高风险改动 → 异构强模型互审（DSH 写的优先交 **Codex Sol (`high`)** 或 **Neon** 审；Opus 5.5 写的优先交 **Codex Sol (`high`)** 或 **Neon** 审；仅极端安全/并发核心改动才动用 Astra）。
 4. **签收或返工**：主控核实 `parsedVerdict.findings` 去重除误报；`ACCEPTED` 输出 ≤15 行精简交付报告；`REJECTED` 复用原实现方 `sessionId`/`threadId` 附带编号清单返工。
