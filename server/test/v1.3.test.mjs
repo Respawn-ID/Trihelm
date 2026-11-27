@@ -15,6 +15,9 @@ import { worktreeCleanup, worktreeCreate, worktreeList } from "../lib/worktree.m
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SERVER_ENTRY = path.resolve(__dirname, "../index.mjs");
 const WAIT_JOB_ENTRY = path.resolve(__dirname, "../wait-job.mjs");
+const EXPECTED_VERSION = JSON.parse(
+  fs.readFileSync(path.resolve(__dirname, "../package.json"), "utf8")
+).version;
 
 function makeTempDir(prefix) {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -245,7 +248,7 @@ rl.on("line", (l) => {
 
   try {
     const init = await rpc("initialize", { protocolVersion: "2025-03-26" });
-    assert.equal(init.result.serverInfo.version, "1.3.0");
+    assert.equal(init.result.serverInfo.version, EXPECTED_VERSION);
 
     // Start two concurrent async jobs: fast HUGE + slow normal
     const j1Res = await rpc("tools/call", {
@@ -291,7 +294,7 @@ rl.on("line", (l) => {
       arguments: {},
     });
     const status = JSON.parse(statusRes.result.content[0].text);
-    assert.equal(status.version, "1.3.0");
+    assert.equal(status.version, EXPECTED_VERSION);
     assert.equal(status.telemetry.totalCallsToday, 2);
     assert.equal(status.telemetry.todayByModel["dsh:auto/deepseek-v4.1-flash"].succeeded, 2);
 

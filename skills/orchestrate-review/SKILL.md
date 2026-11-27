@@ -9,7 +9,7 @@ description: >-
   and fresh-context structured Verdict cross-verification.
 ---
 
-# 主控自主路由、多模型协作与验收规范（Antigravity Orchestrator v1.3）
+# 主控自主路由、多模型协作与验收规范（Trihelm v1.4）
 
 Antigravity 担任**唯一自主主控（前置分诊、路由决策、契约派单、Worktree 隔离与串行合并、失败级联升级、确定性门控与异构验收）**，统筹本机 **DeepSeek Harness (`dsh` 3 槽并发池)**、**Codex CLI (`GPT-6.2 Astra` / `GPT-6.2 Sol`)** 以及 **Antigravity 本体模型（Gemini 4 Neon / 内建 Claude Opus 5.5）**。
 
@@ -63,19 +63,21 @@ Report: 列出改动文件、实际执行命令的最后 10-20 行输出；凡�
 
 防止“过早升级烧钱”与“廉价模型死循环”（**仅适用于代码/测试/逻辑/普通执行报错；配额耗尽走下方第五节，绝不重试**）：
 
-1. **本地自修窗口**：外派模型报常规语法、类型、单测或临时执行错误时，**先一句话通知用户**，再允许原执行方（如 DSH）复用原 `sessionId`/`threadId` 自行修复 **1～2 轮**。
-2. **连续失败 ≥ 2 次触发级联升级**：
-   - 若同一障碍连续失败 ≥ 2 次，或被 Verifier 连续 `REJECTED` 2 次，**立刻一句话通知用户并停止原 Worker 死磕**；
+1. **本地自修窗口与任务串联**：派单可传稳定的 `taskId` 与一句话 `acceptance`（验收条件），服务端自动统计返工次数并在同类非额度报错或复核连续退回 ≥ 2 次时返回 `loopWarning`（`loopDetected: true`）。外派模型报常规语法、类型、单测或临时执行错误时，**先一句话通知用户**，再允许原执行方（如 DSH）复用原 `sessionId`/`threadId` 自行修复 **1～2 轮**。
+2. **连续失败 ≥ 2 次触发升级（含程序刹车信号）**：
+   - 若收到 `loopWarning.loopDetected: true`、同一障碍连续失败 ≥ 2 次，或被 Verifier 连续 `REJECTED` 2 次，**立刻一句话通知用户并停止原 Worker 死磕**；
    - 主控提炼精简失败包（当前 `git diff` + 关键报错尾部 + 已尝试失败路径），按根因类型升级：
      - **底层根因 / 并发死锁 / 算法逻辑死胡同** → 若尚未用过 Sol 深度排查，可先用 **Codex Sol（`high`, `read-only`）** 快速核查；若 Sol/Neon 仍未定位或确属硬核根因，再单次升级给 **Codex Astra（`read-only`, `async: true`）** 产出修正计划（严控 Astra 调用频次）；
      - **复杂多文件重构 / 前端状态缠绕** → 该用就用，升级给 **Antigravity 内建 Claude Opus 5.5**（主控已是 Opus 5.5 直接接管，否则提示切模型或 `/swarm` 并说明其额度较紧）。
-3. **HITL 人工熔断**：升级后仍无法收敛、发现需求存在根本歧义、或出现严重 `scopeAudit.violations` 时，立刻暂停自动循环，给出 ≤15 行阻塞报告交由用户拍板。
+3. **HITL 人工暂停**：升级后仍无法收敛、发现需求存在根本歧义、或出现严重 `scopeAudit.violations` 时，立刻暂停自动循环，给出 ≤15 行阻塞报告交由用户拍板。
 
 ---
 
-## 五、额度耗尽与限流处理规范（一句话先汇报、确认后再切换）
+## 五、额度耗尽与限流处理规范（派发前冷却拦截 + 一句话先汇报）
 
-当任意后端返回 `errorKind: "quota_exhausted" | "rate_limited" | "auth_error"`（含 `reportBeforeFallback: true`，或报错出现 `429` / `insufficient_quota` / `usage limit` / `capacity` / 额度不足）时：
+服务端对冷却期按错误类型分时长管理：**临时限流（429）冷 3 分钟、额度耗尽冷 30 分钟、登录失效仅提示不锁死**；派发前会自动拦截处于冷却期的模型并返回 `cooldownBlocked: true`（用户要求强行重试时可传 `ignoreCooldown: true`）。
+
+当任意后端返回 `errorKind: "quota_exhausted" | "rate_limited" | "auth_error"` 或 `cooldownBlocked: true`（含 `reportBeforeFallback: true`，或报错出现 `429` / `insufficient_quota` / `usage limit` / `capacity` / 额度不足）时：
 
 1. **零重试**：绝不计入代码自修次数，绝不反复重撞已空额度的通道。
 2. **先一句话向用户汇报并等待拍板（严禁静默切走）**：立即暂停当前受影响轨道，简明告知：
@@ -97,8 +99,8 @@ Report: 列出改动文件、实际执行命令的最后 10-20 行输出；凡�
      - 异步启动后直接拿到返回的 `waitCommand`（即 `node .../server/wait-job.mjs <jobId>`），若同时跑多个并行任务可传 `--all <id1> <id2>` 或 `--any <id1> <id2>`；
      - 用后台 `run_command` 启动该命令（`WaitMsBeforeAsync: 500`, `NotificationTimeoutSeconds: 600`）然后直接结束本轮挂起等待；
      - 任务落盘进入终态后 `wait-job.mjs` 在 **100ms 内退出**，Antigravity 自动收到完成唤醒通知，再调用 `job_status(jobId, waitSeconds: 0)` 取完整结果（自带 MCP 进程存活保护，不会死等）。
-  2. **大输出自动瘦身**：超长响应（默认 >16,000 字符）会自动落盘到 `outputFile` 并返回精简首尾，保护主控（尤其是 Neon / Opus 5.5）上下文额度，主控按需 `read_file(outputFile)` 查看细节。
-  3. **运维与观测**：方向跑偏或用户喊停时调用 `job_cancel(jobId)` 精准中止；`job_list()` 查看任务；`orchestrator_status()` 查看连通性、并发池、**跨窗口共享的 `telemetry.activeCooldowns`（配额冷却）及当日各模型调用频次/token 统计**。
+  2. **大输出自动瘦身与报错优先摘录**：超长响应（默认 >16,000 字符）会自动落盘到 `outputFile` 并附上总行数 `outputTotalLines`，同时从省略段落中优先摘出关键报错行；`codex_run` 冗长的成功命令轨迹也会自动合并统计（失败命令原样保留）。主控按需用自带 `read_file(outputFile, StartLine, EndLine)` 分段查看细节。
+  3. **运维与观测**：方向跑偏或用户喊停时调用 `job_cancel(jobId)` 精准中止；`job_list()` 查看任务；`orchestrator_status()` 查看连通性、并发池、**跨窗口共享的 `telemetry.activeCooldowns`（分时长冷却）、返工统计、活跃循环警告及当日各模型调用频次/token 统计**。
 
 ---
 
@@ -122,7 +124,7 @@ Report: 列出改动文件、实际执行命令的最后 10-20 行输出；凡�
 1. **建隔离区**：调用 `worktree_create(repoCwd, name, copyEnv: true, symlinkDirs: [...])` 获取独立 `worktreePath` 与 `orch/*` 分支。
 2. **真并行派发**：将各自 `worktreePath` 作为 `cwd`、各自模块路径作为 `allowedPaths`，并发派发 `dsh_run(..., async: true)` / `codex_run(..., async: true)`。
 3. **独立验收**：各轨道在对应 `worktreePath` 内过确定性测试 + 异构 `verdictMode: true` 验收。
-4. **冲突预检 + 主控串行合并与清理**：合并前先调用 `worktree_list(repoCwd)` 检查 `potentialConflicts` 提前发现多分支重叠文件；**绝不让子 Agent 自动解合并冲突**；由主控在主仓库逐一审 diff 并串行合并/cherry-pick，最后调用 `worktree_cleanup(repoCwd, worktreePath, deleteBranch: true)` 清理现场。
+4. **冲突预检 + 主控串行合并与清理**：合并前先调用 `worktree_list(repoCwd)` 检查 `mergeWithMain` 和 `potentialConflicts`（已提交的干净分支走只读 `git merge-tree` 真冲突检查，有未提交改动时自动退回文件名重合检查，绝不重复报两套）；**绝不让子 Agent 自动解合并冲突**；由主控在主仓库逐一审 diff 并串行合并/cherry-pick，最后调用 `worktree_cleanup(repoCwd, worktreePath, deleteBranch: true)` 清理现场。
 
 ### 3. 会话卫生
 - **返工**：复用原实现方的 `sessionId`（DSH 并发池按亲和路由回原进程）或 `threadId`（Codex）。

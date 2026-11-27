@@ -24,6 +24,9 @@ import { worktreeCleanup, worktreeCreate, worktreeList } from "../lib/worktree.m
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SERVER_ENTRY = path.resolve(__dirname, "../index.mjs");
+const EXPECTED_VERSION = JSON.parse(
+  fs.readFileSync(path.resolve(__dirname, "../package.json"), "utf8")
+).version;
 
 function makeTempDir(prefix) {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -386,7 +389,7 @@ rl.on("line", (l) => {
 
   try {
     const init = await rpc("initialize", { protocolVersion: "2025-03-26" });
-    assert.equal(init.result.serverInfo.version, "1.3.0");
+    assert.equal(init.result.serverInfo.version, EXPECTED_VERSION);
 
     const listed = await rpc("tools/list", {});
     const toolNames = listed.result.tools.map((t) => t.name);
@@ -449,7 +452,7 @@ rl.on("line", (l) => {
     // Quota exhaustion detection: async job_status exposes structured errorInfo
     const asyncQuotaStart = await rpc("tools/call", {
       name: "dsh_run",
-      arguments: { prompt: "SIMULATE_QUOTA_EXHAUSTED", cwd: repoDir, async: true },
+      arguments: { prompt: "SIMULATE_QUOTA_EXHAUSTED", cwd: repoDir, async: true, ignoreCooldown: true },
     });
     const asyncQuotaId = JSON.parse(asyncQuotaStart.result.content[0].text).jobId;
     const asyncQuotaPolled = await rpc("tools/call", {

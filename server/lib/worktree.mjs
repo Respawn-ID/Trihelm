@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -8,6 +8,8 @@ const MANIFEST_FILE_NAME = ".manifest.json";
 const ENV_FILE_RE = /^\.env(\..+)?$/;
 const ENV_TEMPLATE_RE = /^\.env\.(example|sample|template|dist)$/i;
 
+let cachedMergeTreeSupport = null;
+
 function git(args, cwd) {
   return execFileSync("git", args, {
     cwd,
@@ -15,6 +17,62 @@ function git(args, cwd) {
     stdio: ["ignore", "pipe", "pipe"],
     maxBuffer: 10 * 1024 * 1024,
   });
+}
+
+export function supportsGitMergeTree(cwd = process.cwd()) {
+  if (cachedMergeTreeSupport !== null) return cachedMergeTreeSupport;
+  try {
+    const out = git(["--version"], cwd).trim();
+    const m = out.match(/git version (\d+)\.(\d+)/i);
+    if (!m) {
+      cachedMergeTreeSupport = false;
+      return false;
+    }
+    const major = Number(m[1]);
+    const minor = Number(m[2]);
+    cachedMergeTreeSupport = major > 2 || (major === 2 && minor >= 38);
+    return cachedMergeTreeSupport;
+  } catch {
+    cachedMergeTreeSupport = false;
+    return false;
+  }
+}
+
+export function runGitMergeTree(repoRoot, refA, refB) {
+  const res = spawnSync("git", ["merge-tree", "--write-tree", "--name-only", "-z", refA, refB], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    maxBuffer: 10 * 1024 * 1024,
+  });
+
+  if (res.error) {
+    return { ok: false, error: res.error.message };
+  }
+  if (res.status === 0) {
+    return { ok: true, clean: true, conflictFiles: [] };
+  }
+  if (res.status === 1) {
+    const stdout = res.stdout || "";
+    const files = new Set();
+    // With -z: token 0 is resulting tree OID, followed by NUL-delimited unquoted conflicted
+    // file paths until the first empty token separating paths from informational messages.
+    const tokens = stdout.split("\0");
+    for (let i = 1; i < tokens.length; i += 1) {
+      const token = tokens[i];
+      if (token === "") break;
+      files.add(token);
+    }
+    return {
+      ok: true,
+      clean: false,
+      conflictFiles: Array.from(files).sort(),
+    };
+  }
+  return {
+    ok: false,
+    error: (res.stderr || res.stdout || `git merge-tree exited with code ${res.status}`).trim(),
+  };
 }
 
 function resolveGitRepoRoot(repoCwd) {
@@ -26,7 +84,9 @@ function resolveGitRepoRoot(repoCwd) {
   try {
     topLevel = git(["rev-parse", "--show-toplevel"], target).trim();
   } catch (err) {
-    throw new Error(`Not a git repository: ${target} (${err?.stderr?.toString()?.trim() || err.message})`);
+    throw new Error(
+      `Not a git repository: ${target} (${err?.stderr?.toString()?.trim() || err.message})`
+    );
   }
   return fs.realpathSync(topLevel);
 }
@@ -232,6 +292,7 @@ export function worktreeList(args) {
   const repoRoot = resolveGitRepoRoot(args?.repoCwd);
   const worktreesRoot = getWorktreesRoot(repoRoot);
   const manifest = readManifest(worktreesRoot);
+  const canMergeTree = supportsGitMergeTree(repoRoot);
 
   let mainHead = null;
   try {
@@ -245,11 +306,29 @@ export function worktreeList(args) {
     const realPath = fs.existsSync(wt.path) ? fs.realpathSync(wt.path) : wt.path;
     const meta = manifest.entries[realPath] || manifest.entries[wt.path] || null;
     const isMain = realPath === repoRoot;
+    const isOrchestratorWt =
+      !isMain && !wt.bare && (Boolean(meta) || (wt.branch && wt.branch.startsWith("orch/")));
     const dirtyFiles = wt.bare ? 0 : countDirtyFiles(realPath);
-    const changedFiles =
-      !isMain && !wt.bare && (Boolean(meta) || (wt.branch && wt.branch.startsWith("orch/")))
-        ? getWorktreeChangedFiles(realPath, meta?.baseRef || "HEAD", mainHead)
-        : undefined;
+    const changedFiles = isOrchestratorWt
+      ? getWorktreeChangedFiles(realPath, meta?.baseRef || "HEAD", mainHead)
+      : undefined;
+
+    let mergeWithMain;
+    if (isOrchestratorWt) {
+      if (dirtyFiles > 0) {
+        mergeWithMain = { method: "skipped", reason: "worktree_dirty" };
+      } else if (!mainHead || !wt.head || wt.head === mainHead) {
+        mergeWithMain = { method: "skipped", reason: "no_commits_ahead" };
+      } else if (!canMergeTree) {
+        mergeWithMain = { method: "skipped", reason: "git_version_unsupported" };
+      } else {
+        const res = runGitMergeTree(repoRoot, mainHead, wt.head);
+        mergeWithMain = res.ok
+          ? { method: "git-merge-tree", clean: res.clean, conflictFiles: res.conflictFiles }
+          : { method: "skipped", reason: "merge_tree_error", error: res.error };
+      }
+    }
+
     return {
       path: realPath,
       branch: wt.branch,
@@ -262,29 +341,73 @@ export function worktreeList(args) {
       createdAt: meta?.createdAt || null,
       dirtyFiles,
       ...(changedFiles !== undefined ? { changedFiles } : {}),
+      ...(mergeWithMain !== undefined ? { mergeWithMain } : {}),
     };
   });
 
-  // Pre-merge conflict detection across non-main orchestrator worktrees
-  const fileOwners = new Map();
-  for (const wt of worktrees) {
-    if (!Array.isArray(wt.changedFiles) || wt.changedFiles.length === 0) continue;
-    for (const file of wt.changedFiles) {
-      if (!fileOwners.has(file)) fileOwners.set(file, []);
-      fileOwners.get(file).push({
-        branch: wt.branch,
-        path: wt.path,
-      });
+  // Pairwise conflict pre-check across non-main orchestrator worktrees:
+  // Mutually exclusive per pair (never runs both checks on the same pair):
+  // - Both clean & committed -> git merge-tree (true three-way conflict check)
+  // - Either side dirty (or older Git) -> filename overlap check
+  const orchWorktrees = worktrees.filter(
+    (wt) => !wt.isMain && !wt.bare && Array.isArray(wt.changedFiles)
+  );
+  const conflictMap = new Map();
+
+  const recordConflict = (file, wtA, wtB, method, reason = null) => {
+    // Key by file + method + reason so confirmed git-merge-tree conflicts between clean pairs
+    // are never merged with unverified filename-overlap pairs involving dirty worktrees.
+    const key = `${file}\0${method}\0${reason || ""}`;
+    let entry = conflictMap.get(key);
+    if (!entry) {
+      entry = {
+        file,
+        method,
+        ...(reason ? { reason } : {}),
+        worktrees: new Map(),
+      };
+      conflictMap.set(key, entry);
+    }
+    entry.worktrees.set(wtA.path, { branch: wtA.branch, path: wtA.path });
+    entry.worktrees.set(wtB.path, { branch: wtB.branch, path: wtB.path });
+  };
+
+  for (let i = 0; i < orchWorktrees.length; i += 1) {
+    for (let j = i + 1; j < orchWorktrees.length; j += 1) {
+      const wtA = orchWorktrees[i];
+      const wtB = orchWorktrees[j];
+
+      if (wtA.dirtyFiles === 0 && wtB.dirtyFiles === 0 && wtA.head && wtB.head && canMergeTree) {
+        const res = runGitMergeTree(repoRoot, wtA.head, wtB.head);
+        if (res.ok) {
+          if (!res.clean) {
+            for (const file of res.conflictFiles) {
+              recordConflict(file, wtA, wtB, "git-merge-tree");
+            }
+          }
+          continue;
+        }
+      }
+
+      const filesB = new Set(wtB.changedFiles);
+      const reason =
+        wtA.dirtyFiles > 0 || wtB.dirtyFiles > 0 ? "uncommitted_changes" : "git_version_unsupported";
+      for (const file of wtA.changedFiles) {
+        if (filesB.has(file)) {
+          recordConflict(file, wtA, wtB, "file-overlap", reason);
+        }
+      }
     }
   }
 
-  const potentialConflicts = [];
-  for (const [file, owners] of fileOwners.entries()) {
-    if (owners.length > 1) {
-      potentialConflicts.push({ file, worktrees: owners });
-    }
-  }
-  potentialConflicts.sort((a, b) => a.file.localeCompare(b.file));
+  const potentialConflicts = Array.from(conflictMap.values())
+    .map((entry) => ({
+      file: entry.file,
+      method: entry.method,
+      ...(entry.reason ? { reason: entry.reason } : {}),
+      worktrees: Array.from(entry.worktrees.values()),
+    }))
+    .sort((a, b) => a.file.localeCompare(b.file));
 
   return {
     repoRoot,

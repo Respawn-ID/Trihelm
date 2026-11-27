@@ -54,13 +54,14 @@ Restart Antigravity (or reload MCP servers), then verify by asking:
   - **L1B · First-Pass Aesthetic Frontend & Heavy Refactors (Built-in Claude Opus 5.5)**: Asks in one line whether to switch to Opus 5.5 (preferred for visual taste) or let Gemini 4 Neon handle it when Opus quota is tight.
   - **Codex Daily Workhorse (`codex_run` / `codex_review`, `gpt-6.2-sol`)**: Routine PR / `verdictMode` cross-reviews, cross-file debugging, fallback coding, and **ChatGPT built-in `image_gen`** (priority raster image generation/editing) with local `images: [...]` attachment support.
   - **L2 · Throttled Heavy Specialist (`gpt-6.2-astra`)**: Reserved for frontier math/science, unresolved cross-service deadlocks, and 2-failure cascading escalations.
-- **Production Engineering Safeguards (`v1.3.0`)**
+- **Production Engineering Safeguards (`v1.4.0`)**
   - **Event-Driven Zero-Token Wakeup (`server/wait-job.mjs`)**: Watches persisted async job files via `fs.watch` + MCP PID liveness guard so Antigravity wakes up immediately when background jobs finish—no polling timers.
+  - **Pre-Dispatch Cooldown Guard & Report-Before-Fallback**: Differentiates cooldown windows (`rate_limited`: 3m, `quota_exhausted`: 30m, `auth_error`: non-blocking advisory), intercepts calls during active cooldowns (`ignoreCooldown: true` override), notifies the user in one line on any worker error, and never silently switches backends.
+  - **Task Tracking (`taskId` / `acceptance`) & Programmatic Loop Brake**: Groups rework attempts, tracks rework metrics in `telemetry`, appends one-sentence acceptance criteria, and flags `loopWarning` (`loopDetected: true`) after 2 consecutive identical non-quota failures or verdict rejections.
+  - **Lean Responses & Error-Priority Output Spillover**: Compacts verbose Codex command/file-change traces while keeping all failed commands verbatim; spills responses >`16,000` chars to `outputFile` with `outputTotalLines` and extracted middle error lines for on-demand `read_file`. *(Tip: pair with native [`rtk`](https://github.com/rtk-ai/rtk) agent hooks if you also want shell output compression—keep system `git` unwrapped in `PATH`.)*
   - **Path Ownership Guardrails & `diffStat`**: `allowedPaths` / `forbiddenPaths` (protects `.env*` and `.git/` by default) audited via git snapshots and enforced inside DSH ACP permissions.
   - **Strict Heterogeneous Verification (`verdictMode: true`)**: Forces fresh read-only context (forbids reusing `threadId` / `sessionId`) with structured `ACCEPTED` / `REJECTED` JSON evidence.
-  - **Git Worktree Isolation + Conflict Pre-Check**: `worktree_create`, `worktree_list` (with `potentialConflicts` file overlap detection), and `worktree_cleanup`.
-  - **Large Output Spillover**: Responses exceeding `16,000` chars spill verbatim to disk (`outputFile`) with a lean head+tail preview to protect orchestrator context and quota.
-  - **Cross-Window Telemetry & Report-Before-Fallback Quota Handling**: Persists daily per-model call/token stats and active cooldowns (`metrics.json`), notifies the user in one line on any worker error, and never silently switches backends on quota exhaustion.
+  - **Git Worktree Isolation + Non-Redundant Merge Pre-Check**: `worktree_create`, `worktree_list` (read-only `git merge-tree` true conflict check for clean committed branches, falling back cleanly to filename-overlap for dirty uncommitted edits—never duplicating both), and `worktree_cleanup`.
 
 ---
 

@@ -8,8 +8,12 @@ import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import { Codex } from "@openai/codex-sdk";
 import { DshAcpPool } from "./lib/dsh-pool.mjs";
-import { classifyBackendError, formatMcpErrorText } from "./lib/errors.mjs";
-import { DEFAULT_INLINE_LIMIT, spillLargeOutput } from "./lib/output.mjs";
+import {
+  classifyBackendError,
+  createCooldownBlockedError,
+  formatMcpErrorText,
+} from "./lib/errors.mjs";
+import { compactCodexItems, DEFAULT_INLINE_LIMIT, spillLargeOutput } from "./lib/output.mjs";
 import { resolveCodexBin, resolveDshBin } from "./lib/paths.mjs";
 import { auditScopeAfterRun, captureGitSnapshot, resolveScopeConfig } from "./lib/scope.mjs";
 import { TelemetryStore } from "./lib/telemetry.mjs";
@@ -19,7 +23,7 @@ import { worktreeCleanup, worktreeCreate, worktreeList } from "./lib/worktree.mj
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WAIT_JOB_SCRIPT = path.join(__dirname, "wait-job.mjs");
 
-const SERVER_VERSION = "1.3.0";
+const SERVER_VERSION = "1.4.0";
 const CODEX_BIN = resolveCodexBin();
 const DSH_BIN = resolveDshBin();
 const DSH_MAX_CONCURRENCY = Number(process.env.DSH_MAX_CONCURRENCY) || 3;
@@ -73,6 +77,30 @@ function createAbortError(message = "Aborted") {
   return err;
 }
 
+function applyAcceptanceToPrompt(prompt, acceptance) {
+  if (typeof acceptance !== "string" || !acceptance.trim()) return prompt;
+  return `${prompt}\n\nAcceptance criteria: ${acceptance.trim()}`;
+}
+
+function enforceCooldownCheck(toolName, args) {
+  if (args?.ignoreCooldown === true) return;
+  const check = telemetry.checkCooldown(toolName, args);
+  if (check.blocked) {
+    throw createCooldownBlockedError(check);
+  }
+}
+
+function attachTelemetryOutcome(payload, record) {
+  if (!payload || typeof payload !== "object" || !record) return payload;
+  if (record.taskSummary) {
+    payload.taskSummary = record.taskSummary;
+  }
+  if (record.loopStatus) {
+    payload.loopWarning = record.loopStatus;
+  }
+  return payload;
+}
+
 // ---------------------------------------------------------------------------
 // 1. Codex Runner (@openai/codex-sdk streamed + official `codex review`)
 // ---------------------------------------------------------------------------
@@ -103,7 +131,11 @@ function validateCodexArgs(args) {
   }
   const cwd = resolveCwd(args.cwd);
   resolveInputImages(args.images, cwd);
-  return prepareVerdictArgs("codex", args);
+  const effectiveArgs = {
+    ...args,
+    prompt: applyAcceptanceToPrompt(args.prompt, args.acceptance),
+  };
+  return prepareVerdictArgs("codex", effectiveArgs);
 }
 
 async function runCodex(args, { signal, onProgress, isAsync = false } = {}) {
@@ -278,6 +310,7 @@ async function runCodex(args, { signal, onProgress, isAsync = false } = {}) {
       prefix: "codex-run",
       inlineLimit: args.maxResponseChars || DEFAULT_INLINE_LIMIT,
     });
+    const compacted = compactCodexItems(fileChanges, commands, { jobsDir: JOBS_DIR });
 
     const payload = {
       backend: "codex-sdk",
@@ -291,11 +324,19 @@ async function runCodex(args, { signal, onProgress, isAsync = false } = {}) {
         ? {
             outputTruncated: true,
             outputTotalChars: spilled.totalChars,
+            outputTotalLines: spilled.totalLines,
+            ...(spilled.extractedErrorLines > 0
+              ? { extractedErrorLines: spilled.extractedErrorLines }
+              : {}),
             outputFile: spilled.outputFile,
           }
         : {}),
-      fileChanges,
-      commands,
+      fileChanges: compacted.fileChanges,
+      ...(compacted.fileChangesSummary ? { fileChangesSummary: compacted.fileChangesSummary } : {}),
+      ...(compacted.fileChangesLogFile ? { fileChangesLogFile: compacted.fileChangesLogFile } : {}),
+      commands: compacted.commands,
+      ...(compacted.commandsSummary ? { commandsSummary: compacted.commandsSummary } : {}),
+      ...(compacted.commandsLogFile ? { commandsLogFile: compacted.commandsLogFile } : {}),
       errors,
       usage,
     };
@@ -486,6 +527,10 @@ async function runCodexReview(args, { signal, onProgress, isAsync = false } = {}
       ? {
           outputTruncated: true,
           outputTotalChars: spilled.totalChars,
+          outputTotalLines: spilled.totalLines,
+          ...(spilled.extractedErrorLines > 0
+            ? { extractedErrorLines: spilled.extractedErrorLines }
+            : {}),
           outputFile: spilled.outputFile,
         }
       : {}),
@@ -512,7 +557,11 @@ function validateDshArgs(args) {
     throw new Error("`prompt` (string) is required.");
   }
   resolveCwd(args.cwd);
-  return prepareVerdictArgs("dsh", args);
+  const effectiveArgs = {
+    ...args,
+    prompt: applyAcceptanceToPrompt(args.prompt, args.acceptance),
+  };
+  return prepareVerdictArgs("dsh", effectiveArgs);
 }
 
 async function runDsh(args, hooks = {}) {
@@ -559,6 +608,10 @@ async function runDsh(args, hooks = {}) {
   if (spilled.truncated) {
     payload.outputTruncated = true;
     payload.outputTotalChars = spilled.totalChars;
+    payload.outputTotalLines = spilled.totalLines;
+    if (spilled.extractedErrorLines > 0) {
+      payload.extractedErrorLines = spilled.extractedErrorLines;
+    }
     payload.outputFile = spilled.outputFile;
   }
 
@@ -713,6 +766,8 @@ class JobManager {
       timeoutMs,
       meta: {
         cwd: args?.cwd || process.cwd(),
+        taskId: args?.taskId || null,
+        acceptance: typeof args?.acceptance === "string" ? truncate(args.acceptance, 200) : null,
         model: args?.model || null,
         provider: args?.provider || null,
         reasoningEffort: args?.reasoningEffort || null,
@@ -748,11 +803,10 @@ class JobManager {
       .then((res) => {
         if (job.status === "cancelled") return;
         job.status = "completed";
-        job.result = res;
         job.finishedAt = Date.now();
         job.updatedAt = job.finishedAt;
         job.progress = { ...(job.progress || {}), stage: "completed" };
-        telemetry.recordCall({
+        const rec = telemetry.recordCall({
           tool,
           args,
           ok: true,
@@ -760,6 +814,7 @@ class JobManager {
           usage: res?.usage || null,
           result: res,
         });
+        job.result = attachTelemetryOutcome(res, rec);
         this.broadcastProgress(job, job.progress);
         this.persist(job);
         this.notifyWaiters(job);
@@ -773,14 +828,15 @@ class JobManager {
         } else {
           job.status = "failed";
           job.error = err?.message || String(err);
-          job.errorInfo = classifyBackendError(err, tool);
-          telemetry.recordCall({
+          const errInfo = classifyBackendError(err, tool);
+          const rec = telemetry.recordCall({
             tool,
             args,
             ok: false,
             durationMs: Date.now() - job.startedAt,
-            errorInfo: job.errorInfo,
+            errorInfo: errInfo,
           });
+          job.errorInfo = rec?.loopStatus ? { ...errInfo, loopWarning: rec.loopStatus } : errInfo;
         }
         job.finishedAt = Date.now();
         job.updatedAt = job.finishedAt;
@@ -1029,6 +1085,24 @@ const SCOPE_PROPERTIES = {
   },
 };
 
+const TASK_CONTROL_PROPERTIES = {
+  taskId: {
+    type: "string",
+    description:
+      "Optional stable task identifier to group retries/rework attempts, track rework metrics, and detect repeated failure loops.",
+  },
+  acceptance: {
+    type: "string",
+    description:
+      "Optional concise acceptance criteria (one sentence) appended to the prompt and saved in job metadata for consistent verification.",
+  },
+  ignoreCooldown: {
+    type: "boolean",
+    description:
+      "If true, bypasses active quota/rate-limit cooldown pre-check for this model (default false).",
+  },
+};
+
 const TOOLS = [
   {
     name: "orchestrator_status",
@@ -1082,6 +1156,7 @@ const TOOLS = [
           description: "Optional JSON Schema to constrain Codex's finalResponse into structured JSON.",
         },
         ...SCOPE_PROPERTIES,
+        ...TASK_CONTROL_PROPERTIES,
         async: {
           type: "boolean",
           description: "If true, launch in background and immediately return a jobId (default 30 min timeout). Poll via job_status.",
@@ -1117,6 +1192,8 @@ const TOOLS = [
           description: "Optional reasoning effort level for the review.",
         },
         prompt: { type: "string", description: "Optional custom review focus / instructions." },
+        taskId: TASK_CONTROL_PROPERTIES.taskId,
+        ignoreCooldown: TASK_CONTROL_PROPERTIES.ignoreCooldown,
         async: {
           type: "boolean",
           description: "If true, launch in background and immediately return a jobId (default 30 min timeout). Poll via job_status.",
@@ -1163,6 +1240,7 @@ const TOOLS = [
             "If true, enforces read_only permission + fresh session (no sessionId) + structured Verdict JSON response parsing.",
         },
         ...SCOPE_PROPERTIES,
+        ...TASK_CONTROL_PROPERTIES,
         async: {
           type: "boolean",
           description: "If true, launch in background and immediately return a jobId (default 30 min timeout). Poll via job_status.",
@@ -1212,7 +1290,7 @@ const TOOLS = [
   {
     name: "worktree_list",
     description:
-      "List all git worktrees for a repository along with branch names, plugin management status, and dirty file counts.",
+      "List all git worktrees for a repository along with branch names, dirty file counts, and non-redundant merge conflict pre-checks (read-only git merge-tree for clean committed branches, or filename overlap for uncommitted edits).",
     inputSchema: {
       type: "object",
       properties: {
@@ -1395,13 +1473,14 @@ async function handleMcpRequest(msg) {
         payload = await checkStatus();
       } else if (name === "codex_run") {
         validateCodexArgs(toolArgs);
+        enforceCooldownCheck(name, toolArgs);
         if (toolArgs.async === true) {
           payload = jobManager.start("codex_run", toolArgs, (hooks) => runCodex(toolArgs, hooks));
         } else {
           const t0 = Date.now();
           try {
             payload = await runCodex(toolArgs, { onProgress });
-            telemetry.recordCall({
+            const rec = telemetry.recordCall({
               tool: name,
               args: toolArgs,
               ok: true,
@@ -1409,19 +1488,25 @@ async function handleMcpRequest(msg) {
               usage: payload?.usage || null,
               result: payload,
             });
+            attachTelemetryOutcome(payload, rec);
           } catch (err) {
-            telemetry.recordCall({
+            const errInfo = classifyBackendError(err, name);
+            const rec = telemetry.recordCall({
               tool: name,
               args: toolArgs,
               ok: false,
               durationMs: Date.now() - t0,
-              errorInfo: classifyBackendError(err, name),
+              errorInfo: errInfo,
             });
+            if (rec?.loopStatus) {
+              err.errorInfo = { ...errInfo, loopWarning: rec.loopStatus };
+            }
             throw err;
           }
         }
       } else if (name === "codex_review") {
         resolveCwd(toolArgs?.cwd);
+        enforceCooldownCheck(name, toolArgs);
         if (toolArgs.async === true) {
           payload = jobManager.start("codex_review", toolArgs, (hooks) =>
             runCodexReview(toolArgs, hooks)
@@ -1430,47 +1515,58 @@ async function handleMcpRequest(msg) {
           const t0 = Date.now();
           try {
             payload = await runCodexReview(toolArgs, { onProgress });
-            telemetry.recordCall({
+            const rec = telemetry.recordCall({
               tool: name,
               args: toolArgs,
               ok: true,
               durationMs: Date.now() - t0,
               result: payload,
             });
+            attachTelemetryOutcome(payload, rec);
           } catch (err) {
-            telemetry.recordCall({
+            const errInfo = classifyBackendError(err, name);
+            const rec = telemetry.recordCall({
               tool: name,
               args: toolArgs,
               ok: false,
               durationMs: Date.now() - t0,
-              errorInfo: classifyBackendError(err, name),
+              errorInfo: errInfo,
             });
+            if (rec?.loopStatus) {
+              err.errorInfo = { ...errInfo, loopWarning: rec.loopStatus };
+            }
             throw err;
           }
         }
       } else if (name === "dsh_run") {
         validateDshArgs(toolArgs);
+        enforceCooldownCheck(name, toolArgs);
         if (toolArgs.async === true) {
           payload = jobManager.start("dsh_run", toolArgs, (hooks) => runDsh(toolArgs, hooks));
         } else {
           const t0 = Date.now();
           try {
             payload = await runDsh(toolArgs, { onProgress });
-            telemetry.recordCall({
+            const rec = telemetry.recordCall({
               tool: name,
               args: toolArgs,
               ok: true,
               durationMs: Date.now() - t0,
               result: payload,
             });
+            attachTelemetryOutcome(payload, rec);
           } catch (err) {
-            telemetry.recordCall({
+            const errInfo = classifyBackendError(err, name);
+            const rec = telemetry.recordCall({
               tool: name,
               args: toolArgs,
               ok: false,
               durationMs: Date.now() - t0,
-              errorInfo: classifyBackendError(err, name),
+              errorInfo: errInfo,
             });
+            if (rec?.loopStatus) {
+              err.errorInfo = { ...errInfo, loopWarning: rec.loopStatus };
+            }
             throw err;
           }
         }

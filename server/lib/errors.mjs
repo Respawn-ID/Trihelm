@@ -44,15 +44,44 @@ export function inferBackendFromTool(toolName) {
   return "orchestrator";
 }
 
+export function createCooldownBlockedError(check) {
+  const remainingSeconds = Math.max(1, Math.ceil((check?.remainingMs || 0) / 1000));
+  const kind = check?.entry?.errorKind || "quota_exhausted";
+  const backend = check?.entry?.backend || String(check?.key || "unknown").split(":")[0];
+  const message = `Model '${check.key}' is in active ${kind} cooldown (${remainingSeconds}s remaining; last error: ${check?.entry?.message || kind}). Pass ignoreCooldown: true to force a retry.`;
+  const err = new Error(message);
+  err.cooldownBlocked = true;
+  err.errorInfo = {
+    errorKind: kind,
+    backend,
+    retryable: false,
+    reportBeforeFallback: true,
+    cooldownBlocked: true,
+    cooldownKey: check.key,
+    remainingSeconds,
+    expiresAt: check?.entry?.expiresAt || null,
+    message,
+    hint: "Model is in active cooldown from a recent quota/rate-limit error. Do NOT silently switch models; report to the user in one line and ask whether to switch to a fallback or retry with ignoreCooldown: true.",
+  };
+  return err;
+}
+
 export function classifyBackendError(errOrMessage, toolName = "") {
-  const isAbort = errOrMessage && typeof errOrMessage === "object" && errOrMessage.name === "AbortError";
+  if (errOrMessage && typeof errOrMessage === "object" && errOrMessage.errorInfo) {
+    return { ...errOrMessage.errorInfo };
+  }
+
+  const isAbort =
+    errOrMessage &&
+    typeof errOrMessage === "object" &&
+    (errOrMessage.name === "AbortError" || errOrMessage.code === "ABORT_ERR");
   const message =
     typeof errOrMessage === "string"
       ? errOrMessage
       : errOrMessage?.message || String(errOrMessage || "Unknown error");
   const backend = inferBackendFromTool(toolName);
 
-  if (isAbort || /\bcancelled\b/i.test(message)) {
+  if (isAbort || /\bcancell?ed\b/i.test(message)) {
     return {
       errorKind: "cancelled",
       backend,
@@ -116,15 +145,25 @@ export function classifyBackendError(errOrMessage, toolName = "") {
 
 export function formatMcpErrorText(errInfo) {
   const base = `Error: ${errInfo.message}`;
-  if (!errInfo.reportBeforeFallback) {
+  const includeMeta = Boolean(errInfo.reportBeforeFallback || errInfo.loopWarning || errInfo.cooldownBlocked);
+  if (!includeMeta) {
     return base;
   }
   const meta = {
     errorKind: errInfo.errorKind,
     backend: errInfo.backend,
     retryable: errInfo.retryable,
-    reportBeforeFallback: errInfo.reportBeforeFallback,
-    hint: errInfo.hint,
+    reportBeforeFallback: Boolean(errInfo.reportBeforeFallback),
+    ...(errInfo.cooldownBlocked
+      ? {
+          cooldownBlocked: true,
+          cooldownKey: errInfo.cooldownKey,
+          remainingSeconds: errInfo.remainingSeconds,
+          expiresAt: errInfo.expiresAt,
+        }
+      : {}),
+    ...(errInfo.hint ? { hint: errInfo.hint } : {}),
+    ...(errInfo.loopWarning ? { loopWarning: errInfo.loopWarning } : {}),
   };
   return `${base}\n\n${JSON.stringify(meta, null, 2)}`;
 }
