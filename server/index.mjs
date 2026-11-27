@@ -28,7 +28,7 @@ import { worktreeCleanup, worktreeCreate, worktreeList } from "./lib/worktree.mj
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WAIT_JOB_SCRIPT = path.join(__dirname, "wait-job.mjs");
 
-const SERVER_VERSION = "1.4.1";
+const SERVER_VERSION = "1.4.2";
 const CODEX_BIN = resolveCodexBin();
 const DSH_BIN = resolveDshBin();
 const DSH_MAX_CONCURRENCY = Number(process.env.DSH_MAX_CONCURRENCY) || 3;
