@@ -32,6 +32,9 @@ const WRITE_NAME_PATTERNS = [
   /run_command/i,
 ];
 
+const INVALID_SESSION_RE =
+  /session\s*(?:id\s*)?(?:not\s*found|unknown|invalid|expired|closed|does\s*not\s*exist)|(?:unknown|invalid|expired|missing|closed)\s+session/i;
+
 function createAbortError(message = "Aborted") {
   const err = new Error(message);
   err.name = "AbortError";
@@ -313,6 +316,7 @@ export class DshAcpClient {
       this.rl.on("line", (line) => this.handleLine(line));
 
       proc.on("exit", (code, signal) => {
+        if (this.proc !== proc) return;
         this.log(`[${this.workerId}] dsh ACP exited (code=${code}, signal=${signal})`);
         const err = new Error(
           `dsh ACP process exited unexpectedly (code=${code}, signal=${signal}). stderr: ${this.stderrTail
@@ -328,10 +332,12 @@ export class DshAcpClient {
         this.rl = null;
         this.initPromise = null;
         this.activeTurn = null;
+        this.sessionModels.clear();
         if (this.onExit) this.onExit(this.workerId);
       });
 
       proc.on("error", (err) => {
+        if (this.proc !== proc) return;
         this.log(`[${this.workerId}] dsh ACP spawn error: ${err.message}`);
         for (const { reject, timer } of this.pending.values()) {
           clearTimeout(timer);
@@ -339,7 +345,9 @@ export class DshAcpClient {
         }
         this.pending.clear();
         this.proc = null;
+        this.rl = null;
         this.initPromise = null;
+        this.sessionModels.clear();
       });
 
       const initRes = await this.request(
@@ -578,7 +586,18 @@ export class DshAcpClient {
     return next;
   }
 
-  async runPrompt(args, { signal, onProgress, isAsync = false, scopeConfig = null } = {}) {
+  async runPrompt(
+    args,
+    {
+      signal,
+      onProgress,
+      isAsync = false,
+      scopeConfig = null,
+      onSessionBound = null,
+      onSessionInvalidated = null,
+      sessionConfirmed = false,
+    } = {}
+  ) {
     return this.enqueue(async () => {
       if (signal?.aborted) {
         throw createAbortError("Job cancelled");
@@ -601,6 +620,7 @@ export class DshAcpClient {
 
       let sessionId = args.sessionId ? String(args.sessionId) : null;
       let createdNew = false;
+      let confirmedSession = Boolean(sessionId && sessionConfirmed);
       let activeModel = sessionId ? this.sessionModels.get(sessionId) || null : null;
       let modelOpt = null;
       if (!sessionId) {
@@ -617,6 +637,10 @@ export class DshAcpClient {
           this.sessionModels.set(sessionId, activeModel);
         }
         createdNew = true;
+        confirmedSession = true;
+        if (onSessionBound) {
+          onSessionBound(sessionId);
+        }
       }
 
       const requestedModel = args.model || process.env.DSH_DEFAULT_MODEL || "";
@@ -729,18 +753,33 @@ export class DshAcpClient {
           cwd,
           permissionPolicy,
           stopReason: promptRes?.stopReason || null,
-          response: this.truncate(responseText),
+          response: responseText,
           toolCalls,
           deniedActions,
         };
       } catch (err) {
-        if (err.message.includes("timed out")) {
+        let outErr = err;
+        if (err?.message?.includes("timed out")) {
           onAbortCancel();
-          throw new Error(
+          outErr = new Error(
             `${err.message}${isAsync ? "" : " (use async: true for long-running coding tasks)"}`
           );
         }
-        throw err;
+        const invalidSession = INVALID_SESSION_RE.test(String(outErr?.message || ""));
+        if (invalidSession && sessionId) {
+          this.sessionModels.delete(sessionId);
+          confirmedSession = false;
+          if (onSessionInvalidated) {
+            onSessionInvalidated(sessionId);
+          }
+        }
+        if (outErr && typeof outErr === "object") {
+          if (sessionId && confirmedSession && this.isRunning() && !outErr.sessionId) {
+            outErr.sessionId = sessionId;
+          }
+          if (!outErr.workerId) outErr.workerId = this.workerId;
+        }
+        throw outErr;
       } finally {
         if (signal) signal.removeEventListener("abort", onAbortCancel);
         this.activeTurn = null;
@@ -761,10 +800,38 @@ export class DshAcpClient {
   }
 
   dispose() {
-    if (this.proc && !this.proc.killed) {
+    const proc = this.proc;
+    const rl = this.rl;
+    this.proc = null;
+    this.rl = null;
+    this.initPromise = null;
+    this.activeTurn = null;
+    this.sessionModels.clear();
+
+    const disposeErr = new Error(`dsh ACP worker '${this.workerId}' disposed`);
+    for (const { reject, timer } of this.pending.values()) {
+      clearTimeout(timer);
+      reject(disposeErr);
+    }
+    this.pending.clear();
+
+    if (rl) {
       try {
-        this.proc.kill("SIGTERM");
+        rl.removeAllListeners();
+        rl.close();
       } catch {}
+    }
+    if (proc) {
+      try {
+        proc.removeAllListeners();
+        proc.stderr?.removeAllListeners();
+        proc.stdout?.removeAllListeners();
+      } catch {}
+      if (!proc.killed) {
+        try {
+          proc.kill("SIGTERM");
+        } catch {}
+      }
     }
   }
 }
@@ -775,6 +842,7 @@ export class DshAcpPool {
     dshArgs = ["--profile", "acp"],
     maxConcurrency = 3,
     idleTimeoutMs = 600_000,
+    boundSessionIdleTimeoutMs = null,
     defaultSyncTimeoutMs = 150_000,
     resolveCwd,
     resolveTimeoutMs,
@@ -785,6 +853,11 @@ export class DshAcpPool {
     this.dshArgs = dshArgs;
     this.maxConcurrency = Math.min(Math.max(Number(maxConcurrency) || 3, 1), 6);
     this.idleTimeoutMs = Math.max(Number(idleTimeoutMs) || 600_000, 10_000);
+    const parsedBoundIdle = Number(boundSessionIdleTimeoutMs);
+    this.boundSessionIdleTimeoutMs =
+      Number.isFinite(parsedBoundIdle) && parsedBoundIdle > 0
+        ? Math.max(parsedBoundIdle, this.idleTimeoutMs)
+        : Math.max(this.idleTimeoutMs * 3, 1_800_000);
     this.defaultSyncTimeoutMs = defaultSyncTimeoutMs;
     this.resolveCwd = resolveCwd;
     this.resolveTimeoutMs = resolveTimeoutMs;
@@ -932,16 +1005,26 @@ export class DshAcpPool {
     slot.busy = false;
   }
 
-  reapIdleWorkers() {
-    if (this.slots.size <= 1) return;
-    const now = Date.now();
+  reapIdleWorkers(now = Date.now()) {
     for (const [id, slot] of this.slots.entries()) {
-      if (this.slots.size <= 1) break;
-      if (slot.busy || slot.boundSessions.size > 0) continue;
-      if (now - slot.lastUsedAt >= this.idleTimeoutMs) {
-        this.log(`[${id}] Reaping idle DSH ACP worker`);
+      if (slot.busy) continue;
+      const idleMs = now - slot.lastUsedAt;
+      if (slot.boundSessions.size === 0) {
+        if (this.slots.size <= 1) continue;
+        if (idleMs >= this.idleTimeoutMs) {
+          this.log(`[${id}] Reaping idle DSH ACP worker`);
+          slot.client.dispose();
+          this.slots.delete(id);
+        }
+      } else if (idleMs >= this.boundSessionIdleTimeoutMs) {
+        this.log(
+          `[${id}] Reaping stale bound DSH ACP worker (${slot.boundSessions.size} idle session(s))`
+        );
+        this.handleWorkerExit(id);
         slot.client.dispose();
-        this.slots.delete(id);
+        if (this.slots.size > 1) {
+          this.slots.delete(id);
+        }
       }
     }
   }
@@ -949,11 +1032,32 @@ export class DshAcpPool {
   async runPrompt(args, hooks = {}) {
     const requestedSessionId = args?.sessionId ? String(args.sessionId) : null;
     const slot = await this.acquireSlot(requestedSessionId, hooks.signal, hooks.onProgress);
+    const sessionConfirmed = Boolean(
+      requestedSessionId &&
+        slot.boundSessions.has(requestedSessionId) &&
+        this.sessionToWorker.get(requestedSessionId) === slot.id
+    );
+    const bindSession = (sid) => {
+      if (!sid) return;
+      slot.boundSessions.add(sid);
+      this.sessionToWorker.set(sid, slot.id);
+    };
+    const invalidateSession = (sid) => {
+      if (!sid) return;
+      slot.boundSessions.delete(sid);
+      if (this.sessionToWorker.get(sid) === slot.id) {
+        this.sessionToWorker.delete(sid);
+      }
+    };
     try {
-      const res = await slot.client.runPrompt(args, hooks);
+      const res = await slot.client.runPrompt(args, {
+        ...hooks,
+        sessionConfirmed,
+        onSessionBound: bindSession,
+        onSessionInvalidated: invalidateSession,
+      });
       if (res?.sessionId) {
-        slot.boundSessions.add(res.sessionId);
-        this.sessionToWorker.set(res.sessionId, slot.id);
+        bindSession(res.sessionId);
       }
       return res;
     } finally {
@@ -966,14 +1070,25 @@ export class DshAcpPool {
       throw new Error("`sessionId` (string) is required.");
     }
     const workerId = this.sessionToWorker.get(sessionId);
-    const slot = workerId ? this.slots.get(workerId) : null;
+    let slot = workerId ? this.slots.get(workerId) : null;
     if (!slot) {
       return { closed: false, sessionId, reason: "No active DSH worker holds this sessionId." };
     }
-    const res = await slot.client.closeSession(sessionId);
-    slot.boundSessions.delete(sessionId);
-    this.sessionToWorker.delete(sessionId);
-    return res;
+    if (!slot.busy) {
+      slot.busy = true;
+    } else {
+      slot = await this.waitForSlot((s) => s.id === workerId, null);
+    }
+    try {
+      const res = await slot.client.closeSession(sessionId);
+      slot.boundSessions.delete(sessionId);
+      if (this.sessionToWorker.get(sessionId) === slot.id) {
+        this.sessionToWorker.delete(sessionId);
+      }
+      return res;
+    } finally {
+      this.releaseSlot(slot);
+    }
   }
 
   getPoolStats() {

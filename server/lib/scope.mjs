@@ -227,10 +227,22 @@ export function captureGitSnapshot(cwd) {
       }
     }
 
+    let headSha = null;
+    try {
+      headSha = execFileSync("git", ["rev-parse", "--verify", "HEAD"], {
+        cwd: repoRoot,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      }).trim() || null;
+    } catch {
+      headSha = null;
+    }
+
     return {
       isGitRepo: true,
       repoRoot,
       cwd: realCwd,
+      headSha,
       files,
     };
   } catch (err) {
@@ -243,9 +255,59 @@ export function captureGitSnapshot(cwd) {
   }
 }
 
+function resolveEmptyTreeSha(repoRoot) {
+  try {
+    const sha = execFileSync("git", ["hash-object", "-t", "tree", "--stdin"], {
+      cwd: repoRoot,
+      input: "",
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "pipe"],
+    }).trim();
+    if (sha) return sha;
+  } catch {}
+  return "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+}
+
+function getCommittedFilesBetween(repoRoot, cwd, beforeHead, afterHead) {
+  if (!afterHead || beforeHead === afterHead) return [];
+  const realRoot = safeRealpath(repoRoot);
+  const realCwd = safeRealpath(cwd);
+  try {
+    const baseRef = beforeHead || resolveEmptyTreeSha(realRoot);
+    const args = ["diff", "--no-renames", "--name-only", "-z", baseRef, afterHead];
+    const raw = execFileSync("git", args, {
+      cwd: realRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      maxBuffer: 10 * 1024 * 1024,
+    });
+    const out = [];
+    for (const repoRel of raw.split("\0")) {
+      if (!repoRel) continue;
+      const absPath = path.join(realRoot, repoRel);
+      out.push(toPosixPath(path.relative(realCwd, absPath)));
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 export function diffGitSnapshots(before, after) {
   if (!before?.isGitRepo || !after?.isGitRepo) return [];
   const changed = new Set();
+
+  if (before.headSha !== after.headSha) {
+    const committedFiles = getCommittedFilesBetween(
+      after.repoRoot,
+      after.cwd,
+      before.headSha || null,
+      after.headSha || null
+    );
+    for (const relPath of committedFiles) {
+      changed.add(relPath);
+    }
+  }
 
   for (const [relPath, afterMeta] of after.files.entries()) {
     const beforeMeta = before.files.get(relPath);
@@ -273,7 +335,7 @@ export function diffGitSnapshots(before, after) {
   return Array.from(changed).sort();
 }
 
-function computeDiffStat(cwd, repoRoot, changedFiles) {
+function computeDiffStat(cwd, repoRoot, changedFiles, baseRef = "HEAD") {
   if (!Array.isArray(changedFiles) || changedFiles.length === 0) {
     return { totalAdded: 0, totalDeleted: 0, files: [] };
   }
@@ -283,7 +345,7 @@ function computeDiffStat(cwd, repoRoot, changedFiles) {
   const realRoot = safeRealpath(repoRoot);
 
   try {
-    const numstat = execFileSync("git", ["diff", "HEAD", "--numstat", "-z"], {
+    const numstat = execFileSync("git", ["diff", "--no-renames", baseRef || "HEAD", "--numstat", "-z"], {
       cwd: realRoot,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
@@ -388,7 +450,15 @@ export function auditScopeAfterRun(cwd, beforeSnapshot, scopeConfig) {
     }
   }
 
-  const diffStat = computeDiffStat(afterSnapshot.cwd, afterSnapshot.repoRoot, changedFiles);
+  const diffBaseRef =
+    beforeSnapshot.headSha ||
+    (afterSnapshot.headSha ? resolveEmptyTreeSha(afterSnapshot.repoRoot) : "HEAD");
+  const diffStat = computeDiffStat(
+    afterSnapshot.cwd,
+    afterSnapshot.repoRoot,
+    changedFiles,
+    diffBaseRef
+  );
 
   return {
     enforced: true,

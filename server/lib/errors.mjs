@@ -67,8 +67,15 @@ export function createCooldownBlockedError(check) {
 }
 
 export function classifyBackendError(errOrMessage, toolName = "") {
+  const resumable = {};
+  if (errOrMessage && typeof errOrMessage === "object") {
+    if (errOrMessage.threadId) resumable.threadId = String(errOrMessage.threadId);
+    if (errOrMessage.sessionId) resumable.sessionId = String(errOrMessage.sessionId);
+    if (errOrMessage.workerId) resumable.workerId = String(errOrMessage.workerId);
+  }
+
   if (errOrMessage && typeof errOrMessage === "object" && errOrMessage.errorInfo) {
-    return { ...errOrMessage.errorInfo };
+    return { ...resumable, ...errOrMessage.errorInfo };
   }
 
   const isAbort =
@@ -88,6 +95,7 @@ export function classifyBackendError(errOrMessage, toolName = "") {
       retryable: false,
       reportBeforeFallback: false,
       message,
+      ...resumable,
     };
   }
 
@@ -99,6 +107,7 @@ export function classifyBackendError(errOrMessage, toolName = "") {
       reportBeforeFallback: true,
       message,
       hint: "Backend quota exhausted. Notify the user in one line immediately; do NOT retry this backend and do NOT silently switch models—propose fallback options (avoid defaulting routine fallbacks to tighter-quota built-in Opus 5.5) and wait for confirmation.",
+      ...resumable,
     };
   }
 
@@ -110,6 +119,7 @@ export function classifyBackendError(errOrMessage, toolName = "") {
       reportBeforeFallback: true,
       message,
       hint: "Backend rate-limited or at capacity. Do NOT loop retries and do NOT silently switch models; report to the user and ask whether to wait or switch to a recommended fallback backend.",
+      ...resumable,
     };
   }
 
@@ -121,6 +131,7 @@ export function classifyBackendError(errOrMessage, toolName = "") {
       reportBeforeFallback: true,
       message,
       hint: "Backend authentication failed. Stop immediately and report to the user to re-authenticate or approve a fallback backend.",
+      ...resumable,
     };
   }
 
@@ -131,6 +142,7 @@ export function classifyBackendError(errOrMessage, toolName = "") {
       retryable: true,
       reportBeforeFallback: false,
       message,
+      ...resumable,
     };
   }
 
@@ -140,12 +152,19 @@ export function classifyBackendError(errOrMessage, toolName = "") {
     retryable: true,
     reportBeforeFallback: false,
     message,
+    ...resumable,
   };
 }
 
 export function formatMcpErrorText(errInfo) {
   const base = `Error: ${errInfo.message}`;
-  const includeMeta = Boolean(errInfo.reportBeforeFallback || errInfo.loopWarning || errInfo.cooldownBlocked);
+  const includeMeta = Boolean(
+    errInfo.reportBeforeFallback ||
+      errInfo.loopWarning ||
+      errInfo.cooldownBlocked ||
+      errInfo.threadId ||
+      errInfo.sessionId
+  );
   if (!includeMeta) {
     return base;
   }
@@ -154,6 +173,9 @@ export function formatMcpErrorText(errInfo) {
     backend: errInfo.backend,
     retryable: errInfo.retryable,
     reportBeforeFallback: Boolean(errInfo.reportBeforeFallback),
+    ...(errInfo.threadId ? { threadId: errInfo.threadId } : {}),
+    ...(errInfo.sessionId ? { sessionId: errInfo.sessionId } : {}),
+    ...(errInfo.workerId ? { workerId: errInfo.workerId } : {}),
     ...(errInfo.cooldownBlocked
       ? {
           cooldownBlocked: true,

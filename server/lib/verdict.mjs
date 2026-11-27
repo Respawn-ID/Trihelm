@@ -53,15 +53,16 @@ export const VERDICT_OUTPUT_SCHEMA = {
 const VERDICT_RULES_CORE = [
   "--- VERIFIER PROTOCOL (STRICT READ-ONLY) ---",
   "1. You review only; never modify files.",
-  "2. Open every cited or modified file before making claims. Anchor every finding to a repo-relative file path and 1-based line_start/line_end.",
-  "3. Re-run relevant verification commands (tests/typecheck/lint) when allowed in read-only mode and include exact exit_code + last 10-20 lines of output in commands_run.",
-  "4. Never invent metrics or claims. Anything not directly executed or inspected must be listed in unverified as 'not measured'.",
-  "5. Return verdict='ACCEPTED' only when no blocking (critical/high) issues exist and evidence checks out; otherwise return verdict='REJECTED' with concrete fixes. Never write vague praise like 'looks good'.",
+  "2. Verify BOTH requirement/acceptance coverage (every requested behavior and acceptance criterion is satisfied without missing cases or unintended scope drift) AND code quality (bugs, edge cases, regressions, security) in this single pass.",
+  "3. Open every cited or modified file before making claims. Anchor every finding to a repo-relative file path and 1-based line_start/line_end.",
+  "4. Re-run relevant verification commands (tests/typecheck/lint) when allowed in read-only mode and include exact exit_code + last 10-20 lines of output in commands_run.",
+  "5. Never invent metrics or claims. Anything not directly executed or inspected must be listed in unverified as 'not measured'.",
+  "6. Return verdict='ACCEPTED' only when no blocking (critical/high) issues exist and all acceptance criteria and evidence hold; otherwise return verdict='REJECTED' with concrete fixes. Never write vague praise like 'looks good'.",
 ].join("\n");
 
 const VERDICT_DSH_JSON_SUFFIX = [
   VERDICT_RULES_CORE,
-  "6. Your FINAL response MUST be a single valid JSON object (no surrounding prose) matching this exact shape:",
+  "7. Your FINAL response MUST be a single valid JSON object (no surrounding prose) matching this exact shape:",
   JSON.stringify(
     {
       verdict: "ACCEPTED | REJECTED",
@@ -150,6 +151,20 @@ export function validateVerdictObject(obj) {
   }
   if (!Array.isArray(obj.commands_run) || !Array.isArray(obj.findings) || !Array.isArray(obj.unverified)) {
     return { ok: false, warning: "Fields `commands_run`, `findings`, and `unverified` must be arrays." };
+  }
+  const blockingCount = obj.findings.filter(
+    (f) => f && typeof f === "object" && /^(critical|high)$/i.test(String(f.severity || "").trim())
+  ).length;
+  if (obj.verdict === "ACCEPTED" && blockingCount > 0) {
+    return {
+      ok: true,
+      verdict: {
+        ...obj,
+        verdict: "REJECTED",
+        originalVerdict: "ACCEPTED",
+      },
+      consistencyWarning: `Verifier returned ACCEPTED despite ${blockingCount} blocking (critical/high) finding(s); downgraded to REJECTED.`,
+    };
   }
   return { ok: true, verdict: obj };
 }

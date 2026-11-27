@@ -13,7 +13,12 @@ import {
   createCooldownBlockedError,
   formatMcpErrorText,
 } from "./lib/errors.mjs";
-import { compactCodexItems, DEFAULT_INLINE_LIMIT, spillLargeOutput } from "./lib/output.mjs";
+import {
+  compactCodexItems,
+  compactDshToolCalls,
+  DEFAULT_INLINE_LIMIT,
+  spillLargeOutput,
+} from "./lib/output.mjs";
 import { resolveCodexBin, resolveDshBin } from "./lib/paths.mjs";
 import { auditScopeAfterRun, captureGitSnapshot, resolveScopeConfig } from "./lib/scope.mjs";
 import { TelemetryStore } from "./lib/telemetry.mjs";
@@ -23,7 +28,7 @@ import { worktreeCleanup, worktreeCreate, worktreeList } from "./lib/worktree.mj
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WAIT_JOB_SCRIPT = path.join(__dirname, "wait-job.mjs");
 
-const SERVER_VERSION = "1.4.0";
+const SERVER_VERSION = "1.4.1";
 const CODEX_BIN = resolveCodexBin();
 const DSH_BIN = resolveDshBin();
 const DSH_MAX_CONCURRENCY = Number(process.env.DSH_MAX_CONCURRENCY) || 3;
@@ -345,6 +350,9 @@ async function runCodex(args, { signal, onProgress, isAsync = false } = {}) {
       const parsed = parseVerdictResponse(finalResponse);
       if (parsed.ok) {
         payload.parsedVerdict = parsed.verdict;
+        if (parsed.consistencyWarning) {
+          payload.verdictConsistencyWarning = parsed.consistencyWarning;
+        }
       } else {
         payload.verdictParseWarning = parsed.warning;
       }
@@ -356,13 +364,19 @@ async function runCodex(args, { signal, onProgress, isAsync = false } = {}) {
 
     return payload;
   } catch (err) {
-    if (externallyAborted) throw createAbortError("Job cancelled");
-    if (timedOut) {
-      throw new Error(
+    const activeThreadId = thread.id || progress.threadId || null;
+    let outErr = err;
+    if (externallyAborted) {
+      outErr = createAbortError("Job cancelled");
+    } else if (timedOut) {
+      outErr = new Error(
         `Codex timed out after ${timeoutMs}ms${isAsync ? "" : " (use async: true for long-running reasoning tasks)"}`
       );
     }
-    throw err;
+    if (activeThreadId && outErr && typeof outErr === "object" && !outErr.threadId) {
+      outErr.threadId = activeThreadId;
+    }
+    throw outErr;
   } finally {
     clearTimeout(timer);
     if (signal) signal.removeEventListener("abort", onExternalAbort);
@@ -594,9 +608,24 @@ async function runDsh(args, hooks = {}) {
     const parsed = parseVerdictResponse(rawResponse);
     if (parsed.ok) {
       payload.parsedVerdict = parsed.verdict;
+      if (parsed.consistencyWarning) {
+        payload.verdictConsistencyWarning = parsed.consistencyWarning;
+      }
     } else {
       payload.verdictParseWarning = parsed.warning;
     }
+  }
+
+  const compactedTools = compactDshToolCalls(payload.toolCalls, { jobsDir: JOBS_DIR });
+  payload.toolCalls = compactedTools.toolCalls;
+  if (compactedTools.toolCallsSummary) {
+    payload.toolCallsSummary = compactedTools.toolCallsSummary;
+  }
+  if (compactedTools.toolCallsLogFile) {
+    payload.toolCallsLogFile = compactedTools.toolCallsLogFile;
+  }
+  if (compactedTools.toolCallsSpillWarning) {
+    payload.toolCallsSpillWarning = compactedTools.toolCallsSpillWarning;
   }
 
   const spilled = spillLargeOutput(rawResponse, {

@@ -7,6 +7,7 @@ export const DEFAULT_INLINE_LIMIT =
 const MAX_STORED_OUTPUTS = 80;
 const MAX_INLINE_COMMANDS = 8;
 const MAX_INLINE_FILE_CHANGES = 12;
+const MAX_INLINE_DSH_TOOL_CALLS = 12;
 
 const ERROR_LINE_RE =
   /\b(error|failed|failure|exception|traceback|assertionerror|typeerror|referenceerror|syntaxerror|fatal|panic|enoent|eaddrinuse|econnrefused)\b|^\s*(?:FAIL\b|[✖✗×](?:\s|$))/i;
@@ -233,5 +234,81 @@ export function compactCodexItems(fileChanges = [], commands = [], { jobsDir } =
     commands: outCommands,
     ...(commandsSummary ? { commandsSummary } : {}),
     ...(commandsLogFile ? { commandsLogFile } : {}),
+  };
+}
+
+const FAILED_TOOL_STATUS_RE = /^(failed|error|denied|rejected|cancelled|canceled|timed?_?out)$/i;
+const COMPLETED_TOOL_STATUS_RE = /^(completed|succeeded|success|done|ok)$/i;
+
+function isFailedToolCall(tc) {
+  if (!tc || typeof tc !== "object") return false;
+  if (tc.error) return true;
+  return FAILED_TOOL_STATUS_RE.test(String(tc.status || "").trim());
+}
+
+function isCompletedToolCall(tc) {
+  if (!tc || typeof tc !== "object") return false;
+  return COMPLETED_TOOL_STATUS_RE.test(String(tc.status || "").trim());
+}
+
+/**
+ * Compacts verbose DSH ACP `toolCalls` lists when large while retaining ALL
+ * failed/denied/error calls and the most recent non-failed calls inline, and
+ * spilling the full list to disk. Never touches `deniedActions`, `scopeAudit`,
+ * or `parsedVerdict`.
+ */
+export function compactDshToolCalls(toolCalls = [], { jobsDir } = {}) {
+  const safeCalls = Array.isArray(toolCalls) ? toolCalls : [];
+  if (safeCalls.length <= MAX_INLINE_DSH_TOOL_CALLS) {
+    return { toolCalls: safeCalls };
+  }
+
+  const failed = [];
+  const nonFailed = [];
+  let completedCount = 0;
+  let otherCount = 0;
+
+  for (const tc of safeCalls) {
+    if (isFailedToolCall(tc)) {
+      failed.push(tc);
+    } else {
+      nonFailed.push(tc);
+      if (isCompletedToolCall(tc)) {
+        completedCount += 1;
+      } else {
+        otherCount += 1;
+      }
+    }
+  }
+
+  const spilledPath = writeSpillFile(
+    jobsDir,
+    "dsh-tool-calls",
+    JSON.stringify(safeCalls, null, 2),
+    "json"
+  );
+
+  if (!spilledPath) {
+    return {
+      toolCalls: safeCalls,
+      toolCallsSpillWarning:
+        "Could not write full DSH toolCalls log to disk; kept all toolCalls inline to avoid losing trace entries.",
+    };
+  }
+
+  const recentNonFailed = nonFailed.slice(-4);
+  const outCalls = [...failed, ...recentNonFailed];
+  const toolCallsSummary = {
+    total: safeCalls.length,
+    completed: completedCount,
+    failed: failed.length,
+    ...(otherCount > 0 ? { other: otherCount } : {}),
+    omitted: Math.max(0, safeCalls.length - outCalls.length),
+  };
+
+  return {
+    toolCalls: outCalls,
+    toolCallsSummary,
+    toolCallsLogFile: spilledPath,
   };
 }

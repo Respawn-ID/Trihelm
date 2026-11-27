@@ -106,8 +106,10 @@ function summarizeJob(data) {
     tool: data.tool || null,
     status: data.status,
     elapsedMs: data.startedAt ? Math.max(0, end - data.startedAt) : null,
+    taskId: data.meta?.taskId || undefined,
     model: data.meta?.model || res?.model || null,
     verdict: res?.parsedVerdict?.verdict || null,
+    verdictConsistencyWarning: res?.verdictConsistencyWarning || undefined,
     changedFiles: Array.isArray(res?.scopeAudit?.changedFiles)
       ? res.scopeAudit.changedFiles.length
       : undefined,
@@ -115,6 +117,8 @@ function summarizeJob(data) {
       ? res.scopeAudit.violations.length
       : undefined,
     outputFile: res?.outputFile || undefined,
+    taskSummary: res?.taskSummary || undefined,
+    loopWarning: res?.loopWarning || data.errorInfo?.loopWarning || undefined,
     error: data.error || undefined,
     errorInfo: data.errorInfo || undefined,
   };
